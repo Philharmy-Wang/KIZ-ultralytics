@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.env
+*.env
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Ultralytics & DL outputs
+runs/
+wandb/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.npy
+*.npz
+*.bin
+
+# Datasets & temp
+datasets/
+data/
+tmp/
+cache/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
