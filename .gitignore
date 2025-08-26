@@ -20,6 +20,7 @@ runs/
 wandb/
 weights/
 checkpoints/
+project/
 *.pt
 *.pth
 *.onnx
