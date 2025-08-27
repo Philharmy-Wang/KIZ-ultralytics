@@ -1,6 +1,10 @@
-from ultralytics import YOLO
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 from pathlib import Path
+
 import cv2
+
+from ultralytics import YOLO
 
 # 加载模型
 model = YOLO("/mnt/data/wgb/ultralytics/runs/pose/train4/weights/best.pt")
@@ -14,10 +18,10 @@ save_dir.mkdir(parents=True, exist_ok=True)
 for r in results:
     # 只画关键点与骨架，不画检测框，增大关键点和线条粗细
     im_anno = r.plot(
-        boxes=False,          # 不绘制检测框
-        kpt_radius=10,         # 关键点半径（增大关键点大小）
-        kpt_line=True,        # 绘制骨架
-        line_width=3          # 骨架线条粗细
+        boxes=False,  # 不绘制检测框
+        kpt_radius=10,  # 关键点半径（增大关键点大小）
+        kpt_line=True,  # 绘制骨架
+        line_width=3,  # 骨架线条粗细
     )
     # 保存结果
     out_path = save_dir / (Path(r.path).stem + "_kpts.png")

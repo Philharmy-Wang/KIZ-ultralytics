@@ -1,6 +1,10 @@
-from ultralytics import YOLO
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 from pathlib import Path
+
 import cv2
+
+from ultralytics import YOLO
 
 model = YOLO("/mnt/data/wgb/ultralytics/runs/pose/train4/weights/best.pt")
 results = model("/mnt/data/wgb/ultralytics/demo_img/pic2.png")  # 简写等价于 predict
@@ -10,7 +14,7 @@ save_dir.mkdir(parents=True, exist_ok=True)
 
 for r in results:
     # 只画关键点与骨架（不画检测框）
-    im_anno = r.plot(boxes=False)      # 返回BGR的numpy图
+    im_anno = r.plot(boxes=False)  # 返回BGR的numpy图
     out_path = save_dir / (Path(r.path).stem + "_kpts.png")
     cv2.imwrite(str(out_path), im_anno)
 
