@@ -1,8 +1,11 @@
-from ultralytics import YOLO
-from pathlib import Path
-import cv2
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import time
-import numpy as np
+from pathlib import Path
+
+import cv2
+
+from ultralytics import YOLO
 
 # 加载模型
 model = YOLO("/mnt/data/wgb/ultralytics/runs/pose/train4/weights/best.pt")
@@ -17,10 +20,22 @@ timestamp = time.strftime("%Y%m%d_%H%M%S")
 
 # COCO 数据集的骨架拓扑（关键点之间的连接，基于 17 个关键点）
 COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6),  # 头部
-    (5, 7), (7, 9), (6, 8), (8, 10),                # 手臂
-    (5, 11), (6, 12),                               # 躯干到髋部
-    (11, 13), (13, 15), (12, 14), (14, 16)          # 腿部
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (2, 4),
+    (3, 5),
+    (4, 6),  # 头部
+    (5, 7),
+    (7, 9),
+    (6, 8),
+    (8, 10),  # 手臂
+    (5, 11),
+    (6, 12),  # 躯干到髋部
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),  # 腿部
 ]
 
 # 遍历结果
@@ -45,9 +60,9 @@ for i, r in enumerate(results):
                 cv2.line(img, (start_x, start_y), (end_x, end_y), color=(255, 0, 0), thickness=3)
 
     # 保存结果
-    out_path = save_dir / f"{Path(r.path).stem}_kpts_skeleton_{timestamp}_{i+1}.png"
+    out_path = save_dir / f"{Path(r.path).stem}_kpts_skeleton_{timestamp}_{i + 1}.png"
     cv2.imwrite(str(out_path), img)
     print(f"Saved image with keypoints and skeleton to {out_path}")
 
     # 调试信息：打印关键点数量
-    print(f"Number of detected keypoints in instance {i+1}: {len(keypoints)}")
+    print(f"Number of detected keypoints in instance {i + 1}: {len(keypoints)}")
