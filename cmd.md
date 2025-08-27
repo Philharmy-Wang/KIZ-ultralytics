@@ -1,4 +1,5 @@
 # CLI
+
 **Detection Demo**
 yolo detect train data=coco.yaml model=yolo11n.pt epochs=100 batch=256 imgsz=640 device=0,1 projetc=test_train name=coco_train
 
@@ -30,7 +31,6 @@ yolo detect train data=fire-smoke.yaml model=yolo12s.pt epochs=100 batch=256 img
 yolo detect train data=fire-smoke.yaml model=yolo12m.pt epochs=100 batch=256 imgsz=640 device=0,1 project=project/fire_smoke name=yolo12m
 
 yolo detect train data=fire-smoke.yaml model=yolo12l.pt epochs=100 batch=256 imgsz=640 device=0,1 project=project/fire_smoke name=yolo12l
-
 
 **Pose**
 yolo pose train data=coco-pose.yaml model=yolo11n-pose.pt epochs=100 batch=256 imgsz=640 device=0,1 project=test_train name=coco-pose_train
