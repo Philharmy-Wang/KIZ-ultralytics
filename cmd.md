@@ -31,6 +31,9 @@ yolo detect train data=fire-smoke.yaml model=yolo12m.pt epochs=100 batch=256 img
 
 yolo detect train data=fire-smoke.yaml model=yolo12l.pt epochs=100 batch=256 imgsz=640 device=0,1 project=project/fire_smoke name=yolo12l
 
+**Detection macaca**
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11n.yaml epochs=100 batch=64 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11n experiment_name="macaca_yolo11n"
+
 
 **Pose**
 yolo pose train data=coco-pose.yaml model=yolo11n-pose.pt epochs=100 batch=256 imgsz=640 device=0,1 project=test_train name=coco-pose_train
