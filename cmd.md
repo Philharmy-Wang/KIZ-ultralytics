@@ -32,7 +32,26 @@ yolo detect train data=fire-smoke.yaml model=yolo12m.pt epochs=100 batch=256 img
 yolo detect train data=fire-smoke.yaml model=yolo12l.pt epochs=100 batch=256 imgsz=640 device=0,1 project=project/fire_smoke name=yolo12l
 
 **Detection macaca**
-yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11n.yaml epochs=100 batch=64 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11n experiment_name="macaca_yolo11n"
+export COMET_EXPERIMENT_NAME="macaca_yolo11n"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11n.yaml epochs=100 batch=64 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11n 
+
+export COMET_EXPERIMENT_NAME="macaca_yolo11s"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11s.yaml epochs=100 batch=64 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11s
+
+export COMET_EXPERIMENT_NAME="macaca_yolo11m"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11m.yaml epochs=100 batch=32 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11m
+
+export COMET_EXPERIMENT_NAME="macaca_yolo11l"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/11/yolo11l.yaml epochs=100 batch=32 imgsz=640 device=0,1 project=project/macaca_detection name=yolo11l
+
+export COMET_EXPERIMENT_NAME="rt_detr-l"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/rt-detr/rtdetr-l.yaml epochs=100 batch=32 imgsz=640 device=0,1 project=project/macaca_detection name=rt_detr-l
+
+export COMET_EXPERIMENT_NAME="rtdetr-resnet50"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/rt-detr/rtdetr-resnet50.yaml epochs=100 batch=32 imgsz=640 device=0,1 project=project/macaca_detection name=rtdetr-resnet50
+
+export COMET_EXPERIMENT_NAME="rtdetr-resnet101"
+yolo detect train data=/mnt/data/wgb/ultralytics/datasets/macaca-detection/data.yaml model=/mnt/data/wgb/ultralytics/ultralytics/cfg/models/rt-detr/rtdetr-resnet101.yaml epochs=100 batch=32 imgsz=640 device=0,1 project=project/macaca_detection name=rtdetr-resnet101
 
 
 **Pose**
