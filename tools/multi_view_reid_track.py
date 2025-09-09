@@ -2,18 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-多视角 ReID 跟踪（官方 ReID + 进度条 + 实时流支持 + 热力图 + 单目标ID稳定 + 双路写出）
-======================================================================================
-新增能力：
-- 同时保存两份视频：
-  1) *_tracked.mp4          原始可视化（框+ID+轨迹）
-  2) *_tracked_heat.mp4     热力图叠加版（在原始可视化上叠加实时累计热力图）
-- 仍然输出：热力图 PNG、叠加 PNG、MOT 文本、每路 summary.json、全局 aggregate.csv
+多视角 ReID 跟踪（按停留时长的热力图 + 对比度增强 + 双路写出）
+================================================================
+改进点：
+- 热力图强度 = 停留时长（秒），而非帧计数。
+- 高斯核盖章到下采样网格，支持固定或随 bbox 自适应半径。
+- 归一化/对比度：固定上限（clip 秒）或 p99，自带 gamma 提升低强度区域可见度。
+- 维持：ReID、进度条、实时流、单目标稳定ID、MOT/日志/汇总、双路写出。
 
-实现要点：
-- 两个 VideoWriter（plain/overlay）在拿到首帧尺寸后“惰性创建”，以兼容实时流。
-- 热力图每帧按中心点在下采样栅格上累加，99分位归一化 + 伪彩映射后与原帧 alpha 融合。
-- 单目标ID稳定：在 SINGLE_TARGET=True 时，强制输出稳定ID=1，按“前一帧 IoU 优先 + 置信度回退”策略选主目标。
+参考：Ultralytics 热图指南与模块文档（思路一致，代码自实现更可控）。
 """
 
 from __future__ import annotations
@@ -43,12 +40,12 @@ TRACKER_BASE_YAML = "/mnt/data/wgb/ultralytics/ultralytics/cfg/trackers/botsort.
 
 VIDEOS = [
     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-0_x12.mp4",
-    # 也可混合流源："0" / "rtsp://user:pass@ip/stream" / "https://...mp4"
+    # 可混合流源："0" / "rtsp://user:pass@ip/stream" / "https://...mp4"
 ]
 
 GPU_DEVICES = ["0", "1"]
 MAX_THREADS = 4
-OUTPUT_DIR = "/mnt/data/wgb/ultralytics/runs/track/multi_view_reid_official_logs_heatmap"
+OUTPUT_DIR = "/mnt/data/wgb/ultralytics/runs/track/multi_view_reid_official_logs_heatmap_heat"
 
 IMGSZ = 640
 CONF  = 0.25
@@ -59,26 +56,36 @@ SAVE_FPS: Optional[int] = None
 
 LINE_THICK = 2
 DRAW_ID_TEXT = True
-MAX_TRAIL = 0      # 0 或 <=0 表示“无限保留”；>0 则只保留最近 N 个点
+MAX_TRAIL = 0      # 0/负数 = 无限保留所有轨迹点；>0 只保留最近 N 个
 TRAJ_STEP = 1
 
 LOG_INTERVAL = 50
 SAVE_TXT = True
 
-# —— 热力图 —— #
+# —— 热力图（按停留时长/秒） —— #
 ENABLE_HEATMAP = True
-HEATMAP_DOWNSCALE = 2
-HEATMAP_RADIUS = 7
-HEATMAP_ALPHA = 0.35
+HEATMAP_DOWNSCALE = 2          # 下采样倍数（越大越快，越平滑）
+HEATMODE = "bbox"              # "fixed" 固定半径 | "bbox" 随 bbox 自适应
+HEAT_RADIUS_PX = 8             # HEATMODE=fixed 时使用的像素半径（下采样前坐标系）
+HEAT_BBOX_SCALE = 0.25         # HEATMODE=bbox 时：radius ≈ scale * sqrt(w*h)
+HEATMAP_ALPHA = 0.35           # 叠加透明度
 HEATMAP_CMAP = cv2.COLORMAP_JET
-# 双路写出开关：总是保存 plain + overlay 两份
+HEATMAP_GAMMA = 0.6            # <1 提升暗部；1 等比；>1 压暗暗部
+CLIP_MAX_SECONDS: Optional[float] = None  # 例：60.0 → 停留60s达满红；None 用 p99
+STREAM_FPS_ASSUME = 25.0       # 流源拿不到 FPS 时的估计
+DT_MIN, DT_MAX = 0.001, 0.2    # 流源 dt 的夹持（秒）
+
+# 双路写出：原始可视化 + 热力图叠加
 WRITE_BOTH_VIDEOS = True
 
-# —— 单目标ID稳定 —— #
+# —— 单目标ID稳定（你的视频常常只有1只猴） —— #
 SINGLE_TARGET = True
 STABLE_ID = 1
 PRIMARY_IOU_BIAS = 0.1
 MIN_IOU_KEEP = 0.1
+
+# —— 可选类别筛选（只对这些类计入热图；None 表示不过滤） —— #
+TARGET_CLASS_IDS: Optional[List[int]] = None  # 如只算猴子： [0]
 
 # =========================
 # ② 日志
@@ -109,8 +116,8 @@ def ensure_official_reid_yaml(base_yaml: str, out_dir: str, logger: logging.Logg
     cfg["track_high_thresh"] = float(cfg.get("track_high_thresh", 0.5))
     cfg["track_low_thresh"]  = float(cfg.get("track_low_thresh", 0.1))
     cfg["new_track_thresh"]  = max(0.6, float(cfg.get("new_track_thresh", 0.6)))
-    cfg["match_thresh"]      = max(0.9, float(cfg.get("match_thresh", 0.8)))  # 提高匹配阈值
-    cfg["track_buffer"]      = max(60, int(cfg.get("track_buffer", 30)))      # 增加缓冲
+    cfg["match_thresh"]      = max(0.9, float(cfg.get("match_thresh", 0.8)))
+    cfg["track_buffer"]      = max(60, int(cfg.get("track_buffer", 30)))
     cfg.setdefault("visualize", False)
 
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +127,7 @@ def ensure_official_reid_yaml(base_yaml: str, out_dir: str, logger: logging.Logg
     return str(patched.resolve())
 
 # =========================
-# ④ 工具函数：源解析/元信息/绘制/MOT/热力图
+# ④ 工具：源解析 / 元信息 / 绘制 / MOT
 # =========================
 def is_file_path(s: str) -> bool:
     try:
@@ -191,35 +198,106 @@ def write_mot(txt: Path, frame_idx: int, ids, xyxy):
             w, h = x2 - x1, y2 - y1
             f.write(f"{frame_idx},{int(tid)},{x1:.2f},{y1:.2f},{w:.2f},{h:.2f},1.0,-1,-1,-1\n")
 
-# —— 热力图 —— #
-def ensure_heatmap(hm_state: dict, w: int, h: int):
-    if hm_state.get("accum") is None:
-        ds = max(1, int(HEATMAP_DOWNSCALE))
-        aw, ah = max(1, w // ds), max(1, h // ds)
-        hm_state["accum"] = np.zeros((ah, aw), dtype=np.float32)
-        hm_state["ds"] = ds
-        hm_state["radius"] = int(HEATMAP_RADIUS)
+# =========================
+# ⑤ 热力图（停留时长秒）实现
+# =========================
+class DwellHeatmap:
+    """
+    将目标中心点按 dt(秒) 权重，用高斯核累加到下采样网格；累计矩阵的单位是“秒”。
+    """
+    def __init__(self, downscale:int, mode:str, radius_px:int, bbox_scale:float):
+        self.accum: Optional[np.ndarray] = None
+        self.ds = max(1, int(downscale))
+        self.mode = mode
+        self.radius_px = max(1, int(radius_px))
+        self.bbox_scale = float(bbox_scale)
+        self.kernels = {}  # 半径->预计算高斯核（归一化 sum=1）
 
-def heatmap_add_points(hm_state: dict, points: List[Tuple[int,int]]):
-    acc = hm_state["accum"]; ds = hm_state["ds"]; r = hm_state["radius"]
-    for (x, y) in points:
-        xx, yy = int(x)//ds, int(y)//ds
-        cv2.circle(acc, (xx, yy), r, 1.0, thickness=-1)
+    def _ensure(self, w:int, h:int):
+        if self.accum is None:
+            aw, ah = max(1, w // self.ds), max(1, h // self.ds)
+            self.accum = np.zeros((ah, aw), dtype=np.float32)
 
-def heatmap_render(hm_state: dict, out_size: Tuple[int,int]) -> np.ndarray:
-    acc = hm_state["accum"]
-    if acc is None: return None
-    vmax = np.percentile(acc, 99) if acc.max() > 0 else 1.0
-    norm = (np.clip(acc / (vmax + 1e-6), 0, 1) * 255).astype(np.uint8)
-    up = cv2.resize(norm, out_size, interpolation=cv2.INTER_CUBIC)
-    color = cv2.applyColorMap(up, HEATMAP_CMAP)
-    return color
+    @staticmethod
+    def _gaussian2d(ks:int, sigma:float) -> np.ndarray:
+        ax = np.arange(-ks//2 + 1., ks//2 + 1.)
+        xx, yy = np.meshgrid(ax, ax)
+        k = np.exp(-(xx**2 + yy**2) / (2. * sigma**2))
+        s = k.sum(); 
+        return (k / (s + 1e-8)).astype(np.float32)
+
+    def _get_kernel(self, px_radius:int) -> np.ndarray:
+        # 令 kernel 尺寸 ~ 6*sigma，sigma ~ px_radius/2
+        px_radius = max(1, int(px_radius))
+        sigma = max(1.0, px_radius / 2.0)
+        ks = int(6 * sigma) | 1  # 奇数
+        key = (ks, round(sigma,1))
+        if key not in self.kernels:
+            self.kernels[key] = self._gaussian2d(ks, sigma)
+        return self.kernels[key]
+
+    def _radius_for_box(self, x1:int, y1:int, x2:int, y2:int) -> int:
+        if self.mode == "fixed":
+            return self.radius_px
+        # bbox 自适应：对角线近似 ~ sqrt(w*h)*sqrt(2)；简化用 sqrt(w*h)
+        w = max(1, x2 - x1); h = max(1, y2 - y1)
+        est = int(self.bbox_scale * np.sqrt(w * h))
+        return max(2, est)
+
+    def add(self, boxes_xyxy: np.ndarray, dt_sec: float):
+        """
+        在每个目标中心处“盖章”一个高斯核，核强度乘以 dt_sec，使得累计量以秒为单位。
+        """
+        if self.accum is None:
+            raise RuntimeError("heatmap not initialized yet")
+
+        H, W = self.accum.shape
+        for b in boxes_xyxy:
+            x1, y1, x2, y2 = map(int, b.tolist())
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            # 下采样坐标
+            xx, yy = cx // self.ds, cy // self.ds
+
+            r = self._radius_for_box(x1, y1, x2, y2) // self.ds
+            r = max(2, r)
+            ker = self._get_kernel(r)
+            kh, kw = ker.shape
+            # 将 kernel 覆盖到以 (yy,xx) 为中心的 ROI
+            y0 = yy - kh//2; y1_ = y0 + kh
+            x0 = xx - kw//2; x1_ = x0 + kw
+
+            # 与边界相交
+            ry0, ry1 = max(0, y0), min(H, y1_)
+            rx0, rx1 = max(0, x0), min(W, x1_)
+            ky0, ky1 = ry0 - y0, ry1 - y0
+            kx0, kx1 = rx0 - x0, rx1 - x0
+            if ry1 <= ry0 or rx1 <= rx0: 
+                continue
+
+            # 盖章（乘以 dt_sec）
+            self.accum[ry0:ry1, rx0:rx1] += (ker[ky0:ky1, kx0:kx1] * dt_sec).astype(np.float32)
+
+    def render(self, out_size: Tuple[int,int], clip_seconds: Optional[float], gamma: float, cmap:int) -> np.ndarray:
+        acc = self.accum
+        if acc is None:
+            return None
+        if clip_seconds and clip_seconds > 0:
+            vmax = clip_seconds
+        else:
+            vmax = max(1e-3, np.percentile(acc, 99))  # p99 自适应
+        norm = np.clip(acc / (vmax + 1e-6), 0.0, 1.0)
+        if gamma and gamma > 0:
+            norm = np.power(norm, 1.0 / float(gamma))
+        u8 = (norm * 255.0 + 0.5).astype(np.uint8)
+        up = cv2.resize(u8, out_size, interpolation=cv2.INTER_CUBIC)
+        color = cv2.applyColorMap(up, cmap)
+        return color
 
 def overlay_heatmap(frame: np.ndarray, heat_color: np.ndarray, alpha: float) -> np.ndarray:
     return cv2.addWeighted(heat_color, alpha, frame, 1.0 - alpha, 0.0)
 
 # =========================
-# ⑤ 统计
+# ⑥ 统计
 # =========================
 class RunStats:
     def __init__(self, name: str):
@@ -244,7 +322,7 @@ class RunStats:
         )
 
 # =========================
-# ⑥ 单目标选择与ID稳定
+# ⑦ 单目标选择与ID稳定
 # =========================
 def iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
     xx1, yy1 = max(a[0], b[0]), max(a[1], b[1])
@@ -267,9 +345,10 @@ def select_primary_box(prev_box: Optional[np.ndarray], boxes_xyxy: np.ndarray, c
     return int(np.argmax(conf))
 
 # =========================
-# ⑦ 单路处理（双路写出）
+# ⑧ 单路处理（双路写出 + 停留时长热力图）
 # =========================
 def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: Path, glog: logging.Logger):
+    # 解析源
     src_parsed, nice_name, is_stream = parse_source_and_name(video_path)
 
     # 每路日志
@@ -284,7 +363,6 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
     if not is_stream and not is_file_path(str(video_path)):
         raise AssertionError(f"视频不存在：{video_path}")
 
-    # 输出路径
     out_dir = out_root / nice_name; out_dir.mkdir(parents=True, exist_ok=True)
     out_plain_path   = out_dir / f"{nice_name}_tracked.mp4"
     out_overlay_path = out_dir / f"{nice_name}_tracked_heat.mp4"
@@ -293,9 +371,8 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
 
     save_fps = SAVE_FPS or (src_fps if src_fps and src_fps > 0 else 25.0)
 
-    # 惰性创建两个写出器
-    vw_plain = None
-    vw_overlay = None
+    # 惰性写出
+    vw_plain = vw_overlay = None
     def ensure_writers(w: int, h: int):
         nonlocal vw_plain, vw_overlay
         if vw_plain is None:
@@ -312,15 +389,16 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
     trails: Dict[int, object] = {}
     stats = RunStats(nice_name)
 
-    # 热力图状态
-    hm = {"accum": None, "ds": None, "radius": None}
+    # 热力图（按秒累计）
+    hm = DwellHeatmap(HEATMAP_DOWNSCALE, HEATMODE, HEAT_RADIUS_PX, HEAT_BBOX_SCALE)
 
-    # 进度条（仅文件）
+    # 进度条
     pbar = None
     if (not is_stream) and total_frames > 0 and tqdm is not None:
         pbar = tqdm(total=total_frames, position=next(_PROGRESS_POS), desc=nice_name, leave=True, ncols=100)
 
     prev_primary_box: Optional[np.ndarray] = None
+    last_t = time.perf_counter()
 
     # 流式推理
     gen = model.track(
@@ -331,59 +409,77 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
 
     try:
         for results in gen:
-            frame = results.orig_img                   # 原始帧（BGR）
+            frame = results.orig_img
             h, w = frame.shape[:2]
             ensure_writers(w, h)
+            hm._ensure(w, h)
 
-            # 热力图准备
-            if ENABLE_HEATMAP:
-                ensure_heatmap(hm, w, h)
+            # —— 计算本帧 dt（秒）——
+            if is_stream:
+                now = time.perf_counter()
+                dt = max(DT_MIN, min(DT_MAX, now - last_t))
+                last_t = now
+            else:
+                fps = src_fps if (src_fps and src_fps > 0) else STREAM_FPS_ASSUME
+                dt = 1.0 / float(fps)
 
             boxes = getattr(results, "boxes", None)
             det_ids, xyxy = [], None
 
             if boxes is not None and len(boxes) > 0:
-                xyxy_all = boxes.xyxy.cpu().numpy()
-                conf_all = boxes.conf.cpu().numpy() if getattr(boxes, "conf", None) is not None else np.ones((len(boxes),), np.float32)
-
-                if SINGLE_TARGET:
-                    idx = select_primary_box(prev_primary_box, xyxy_all, conf_all)
-                    xyxy = torch.from_numpy(xyxy_all[idx:idx+1])
-                    det_ids = [STABLE_ID]
-                    prev_primary_box = xyxy_all[idx]
-                else:
-                    if boxes.id is not None:
-                        det_ids = boxes.id.int().tolist()
+                # 可选类别筛选（只对猴子等目标生效）
+                keep_idx = np.arange(len(boxes))
+                if TARGET_CLASS_IDS is not None and getattr(boxes, "cls", None) is not None:
+                    cls_arr = boxes.cls.cpu().numpy().astype(int)
+                    mask = np.isin(cls_arr, np.array(TARGET_CLASS_IDS, dtype=int))
+                    keep_idx = np.where(mask)[0]
+                    if keep_idx.size == 0:
+                        xyxy = None
                     else:
-                        det_ids = list(range(1, len(boxes)+1))
-                    xyxy = boxes.xyxy.cpu()
+                        boxes = boxes[keep_idx]
+
+                if boxes is not None and len(boxes) > 0:
+                    xyxy_all = boxes.xyxy.cpu().numpy()
+                    conf_all = boxes.conf.cpu().numpy() if getattr(boxes, "conf", None) is not None else np.ones((len(boxes),), np.float32)
+
+                    if SINGLE_TARGET:
+                        idx = select_primary_box(prev_primary_box, xyxy_all, conf_all)
+                        xyxy = torch.from_numpy(xyxy_all[idx:idx+1])
+                        det_ids = [STABLE_ID]
+                        prev_primary_box = xyxy_all[idx]
+                    else:
+                        if boxes.id is not None:
+                            det_ids = boxes.id.int().tolist()
+                        else:
+                            det_ids = list(range(1, len(boxes)+1))
+                        xyxy = boxes.xyxy.cpu()
+                else:
+                    prev_primary_box = None
+                    xyxy = None
             else:
                 prev_primary_box = None
 
-            # —— 原始可视化帧（先画框/ID/轨迹）——
+            # —— 可视化（plain）——
             plain_frame = frame.copy()
             if xyxy is not None and len(det_ids) > 0:
                 draw_boxes_ids_trails(plain_frame, xyxy, det_ids, trails, stats.frames)
                 if SAVE_TXT:
                     write_mot(out_txt, stats.frames + 1, det_ids, xyxy)
 
-                # 热力图栅格累积：用目标中心点
-                if ENABLE_HEATMAP:
-                    pts = []
-                    for box in xyxy:
-                        x1, y1, x2, y2 = map(int, box.tolist())
-                        pts.append(((x1+x2)//2, (y1+y2)//2))
-                    heatmap_add_points(hm, pts)
+                # —— 按秒计入热力图 —— #
+                # 使用 bbox 自适应/固定半径的高斯核盖章，核总和=1；乘以 dt -> 秒
+                hm.add(xyxy.cpu().numpy(), float(dt))
 
-            # —— 叠加帧（把热力图叠在“已绘制 plain_frame”上）——
+            # —— 叠加帧 —— #
             if WRITE_BOTH_VIDEOS and ENABLE_HEATMAP:
-                heat = heatmap_render(hm, (w, h))
+                heat = hm.render((w, h), CLIP_MAX_SECONDS, HEATMAP_GAMMA, HEATMAP_CMAP)
                 overlay_frame = overlay_heatmap(plain_frame, heat, HEATMAP_ALPHA) if heat is not None else plain_frame
             else:
                 overlay_frame = None
 
             # 写帧
-            vw_plain.write(plain_frame)
+            if vw_plain is not None:
+                vw_plain.write(plain_frame)
             if WRITE_BOTH_VIDEOS and vw_overlay is not None:
                 vw_overlay.write(overlay_frame if overlay_frame is not None else plain_frame)
 
@@ -404,16 +500,14 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
         if vw_plain is not None: vw_plain.release()
         if vw_overlay is not None: vw_overlay.release()
 
-    # 收尾：保存热力图 PNG（纯热力图 + 叠加图）
-    if ENABLE_HEATMAP and hm["accum"] is not None:
-        heat = heatmap_render(hm, (w, h))
-        if heat is not None:
-            cv2.imwrite(str(out_dir / f"{nice_name}_heatmap.png"), heat)
-            # 取最后一帧的“plain_frame”生成 overlay PNG（这里简单用最后分辨率的空白底做演示）
-            # 若想用视频最后一帧当底，可在循环里缓存一份 plain_frame_copy。
-            base = np.zeros_like(heat)  # 黑底
-            overlay_img = overlay_heatmap(base, heat, HEATMAP_ALPHA)
-            cv2.imwrite(str(out_dir / f"{nice_name}_heatmap_overlay.png"), overlay_img)
+    # —— 输出热力图 PNG —— #
+    heat = hm.render((w, h), CLIP_MAX_SECONDS, HEATMAP_GAMMA, HEATMAP_CMAP) if (ENABLE_HEATMAP and hm.accum is not None) else None
+    if heat is not None:
+        cv2.imwrite(str(out_dir / f"{nice_name}_heatmap.png"), heat)
+        # 叠加版 PNG
+        base = np.zeros_like(heat)  # 黑底
+        overlay_img = overlay_heatmap(base, heat, HEATMAP_ALPHA)
+        cv2.imwrite(str(out_dir / f"{nice_name}_heatmap_overlay.png"), overlay_img)
 
     # 总结
     summary = stats.snapshot()
@@ -423,7 +517,7 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
         output_video_overlay=str(out_overlay_path) if WRITE_BOTH_VIDEOS else "",
         mot_txt=str(out_txt if SAVE_TXT else ""),
         src_fps=src_fps, total_frames=total_frames,
-        heatmap=str(out_dir / f"{nice_name}_heatmap.png") if ENABLE_HEATMAP else ""
+        heatmap=str(out_dir / f"{nice_name}_heatmap.png") if heat is not None else ""
     ))
     summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -431,7 +525,7 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
               f"plain={out_plain_path} overlay={out_overlay_path if WRITE_BOTH_VIDEOS else 'N/A'}")
 
 # =========================
-# ⑧ 主入口：多线程 + 汇总
+# ⑨ 主入口：多线程 + 汇总
 # =========================
 def log_env(logger: logging.Logger):
     logger.info(f"Torch: {torch.__version__}  CUDA available: {torch.cuda.is_available()}")
