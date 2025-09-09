@@ -68,3 +68,7 @@ yolo pose predict model=/mnt/data/wgb/ultralytics/runs/pose/train4/weights/best.
 yolo pose predict model=/mnt/data/wgb/ultralytics/runs/pose/train4/weights/best.pt source='/mnt/data/wgb/ultralytics/demo_img/dog/' show=True save=True
 
 yolo pose predict model=yolo11l-pose.pt source='/mnt/data/wgb/ultralytics/demo_img/dog/' show=True save=True
+
+
+**Track**
+yolo track model=/mnt/data/wgb/ultralytics/runs/detect/train/weights/best.pt source=/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-1.avi tracker=/mnt/data/wgb/ultralytics/ultralytics/cfg/trackers/botsort.yaml device=0,1

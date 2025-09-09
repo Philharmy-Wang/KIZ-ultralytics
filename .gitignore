@@ -35,6 +35,8 @@ data/
 tmp/
 cache/
 *.log
+*.mp4
+*.avi
 
 # OS
 .DS_Store
