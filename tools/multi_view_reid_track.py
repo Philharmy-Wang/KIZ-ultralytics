@@ -2,20 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-多视角 ReID 跟踪（官方 ReID 模型 + 全流程日志）
-================================================
+多视角 ReID 跟踪（官方 ReID + 进度条 + 实时流支持 + 全流程日志）
+================================================================
 满足需求：
 1) 持久化跟踪（persist=True）
 2) 随时间绘制轨迹（自定义折线）
 3) 多线程跟踪（每路视频独立线程与 YOLO 实例）
 4) 启用 ReID（Ultralytics 官方默认：with_reid=True, model=auto）
 5) 输出处理/运行过程：控制台与文件日志、每路 summary.json、全局 aggregate.csv
+6) 新增：文件源显示 tqdm 进度条；实时流（摄像头/RTSP/HTTP）进入无进度条实时模式并周期性输出统计日志
 
 编程思路（嵌入式说明）：
 - 用 logging 统一输出（含线程名），既在控制台打印，也写入文件。
-- 每路视频维护运行统计：累计帧数、唯一 ID 集合、平均 FPS 等；定期（LOG_INTERVAL 帧）打印进度。
-- 以 stream=True 获取逐帧结果，自绘框/ID/轨迹，自己写视频，避免 CLI 版本差异导致的不确定参数。
-- ReID：对 botsort.yaml 打补丁（with_reid=True, model=auto），由 Ultralytics 自动选择/下载分类模型用作 ReID。
+- 每路视频维护运行统计：累计帧数、唯一 ID 集合、平均 FPS 等；对“文件源”显示 tqdm 进度条，对“实时流源”按 LOG_INTERVAL 帧打印统计。
+- 以 stream=True 逐帧获取结果，自绘框/ID/轨迹，自己写视频，避免 CLI 参数差异。
+- ReID：对 botsort.yaml 打补丁（with_reid=True, model=auto），交给 Ultralytics 自动选择/下载官方 ReID 模型。
+- 实时流常见问题：首帧未到时无法知道尺寸 → 使用“惰性创建 VideoWriter”（拿到首帧再创建）。
 """
 
 from __future__ import annotations
@@ -27,6 +29,14 @@ from typing import Dict, List, Tuple, Optional
 import torch
 from ultralytics import YOLO
 
+# 进度条：若环境无 tqdm 则优雅降级为仅日志
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
+
+from itertools import count
+_PROGRESS_POS = count(0)   # 多线程下给每路视频分配不同的 tqdm 行位
 
 # =========================
 # ① 可配置参数（根据你的环境修改）
@@ -38,26 +48,39 @@ MODEL_PATH = "/mnt/data/wgb/ultralytics/runs/detect/train/weights/best.pt"
 # 你的 botsort.yaml（Ultralytics 自带）
 TRACKER_BASE_YAML = "/mnt/data/wgb/ultralytics/ultralytics/cfg/trackers/botsort.yaml"
 
-# 多路视频（同一场景不同视角）
+# 多路输入（本地文件 / 摄像头ID / rtsp/http 链接 都支持）：
+#   - 文件会显示进度条；
+#   - 流（摄像头/rtsp/http）为实时模式，不显示进度条，仅周期性日志。
 # VIDEOS = [
-#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-0.avi",
-#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-1.avi",
-#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-2.avi",
-#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-3.avi",
+#     # 文件（你当前加速后的 12× 视频）
+#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-0_x12.mp4",
+#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-1_x12.mp4",
+#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-2_x12.mp4",
+#     "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-3_x12.mp4",
+#     # 例子：本机摄像头
+#     # "0",
+#     # 例子：RTSP 网络摄像头
+#     # "rtsp://user:pass@192.168.1.10:554/stream1",
+#     # 例子：HTTP 在线视频
+#     # "https://example.com/some_video.mp4",
 # ]
 
 VIDEOS = [
-    "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-0_x12.mp4",
-    "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-1_x12.mp4",
-    "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-2_x12.mp4",
-    "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-3_x12.mp4",
+    #  "https://www.bilibili.com/video/BV1UvcRehE8g/?share_source=copy_web&vd_source=80dfdf4ec93c91a52b688cd7bd44a8c9"
+    # 文件（你当前加速后的 12× 视频）
+    "/mnt/data/wgb/ultralytics/demo_video/rec-16328-con-20250410142418-camera-0_x12.mp4"
+    # 例子：本机摄像头
+    # "0",
+    # 例子：RTSP 网络摄像头
+    # "rtsp://user:pass@192.168.1.10:554/stream1",
+    # 例子：HTTP 在线视频
+    # "https://example.com/some_video.mp4",
 ]
-
 
 # GPU 轮询分配（按视频索引循环使用）
 GPU_DEVICES = ["0", "1"]   # 只有一张卡就 ["0"]
 
-# 最大并发线程数（通常与视频数一致）
+# 最大并发线程数（通常与视频数一致；若显存紧张可调小）
 MAX_THREADS = 4
 
 # 输出根目录
@@ -67,18 +90,18 @@ OUTPUT_DIR = "/mnt/data/wgb/ultralytics/runs/track/multi_view_reid_official_logs
 IMGSZ = 640
 CONF  = 0.25
 IOU   = 0.45
-HALF  = True              # 支持 FP16 的显卡建议 True
-VID_STRIDE = 1            # 2/3 可跳帧提速
-SAVE_FPS: Optional[int] = None  # None=沿用源视频 FPS
+HALF  = True               # 支持 FP16 的显卡建议 True
+VID_STRIDE = 1             # 2/3 可跳帧提速
+SAVE_FPS: Optional[int] = None  # None=沿用源视频 FPS（流拿不到 FPS 时用 25）
 
 # 可视化参数
 LINE_THICK = 2
 DRAW_ID_TEXT = True
-MAX_TRAIL = 60   # 每个目标保留多少个历史点
+MAX_TRAIL = 600   # 每个目标保留多少个历史点
 TRAJ_STEP = 1    # 每 TRAJ_STEP 帧记录一次轨迹点
 
 # 记录运行过程的粒度
-LOG_INTERVAL = 50  # 每处理多少帧打印一次进度
+LOG_INTERVAL = 50  # 每处理多少帧打印一次进度/统计
 SAVE_TXT = True    # 另存 MOT 简化文本（便于后处理/评估）
 
 
@@ -122,7 +145,7 @@ def ensure_official_reid_yaml(base_yaml: str, out_dir: str, logger: logging.Logg
     """
     读取 botsort.yaml，强制：
       - with_reid: True
-      - model: auto  （Ultralytics 自动选择/下载官方分类模型）
+      - model: auto  （Ultralytics 自动选择/下载官方 ReID 分类模型）
     其余关键阈值若缺失则补默认。
     """
     base = Path(base_yaml)
@@ -150,8 +173,61 @@ def ensure_official_reid_yaml(base_yaml: str, out_dir: str, logger: logging.Logg
 
 
 # =========================
-# ④ 可视化与 MOT 写出
+# ④ 工具：源解析 / 元信息探测 / 可视化 / MOT
 # =========================
+
+def is_file_path(s: str) -> bool:
+    """判断 source 是否为本地文件路径（存在即算文件）"""
+    try:
+        p = Path(s)
+        return p.exists() and p.is_file()
+    except Exception:
+        return False
+
+def parse_source_and_name(src: str) -> Tuple[object, str, bool]:
+    """
+    解析 source：
+      - 本地文件：返回 (绝对路径字符串, '文件名', is_stream=False)
+      - 摄像头编号 '0'/'1'：返回 (int(id), 'cam{id}', is_stream=True)
+      - URL (rtsp/rtmp/http/https)：返回 (原字符串, '流的简名', is_stream=True)
+    """
+    s = str(src).strip()
+    if s.isdigit():  # 摄像头 ID
+        return int(s), f"cam{s}", True
+
+    low = s.lower()
+    if low.startswith(("rtsp://", "rtmp://", "http://", "https://")):
+        # 简单可读名（去协议/认证信息/查询参数）
+        base = s.split("://", 1)[-1]
+        base = base.split("?")[0].split("@")[-1].replace("/", "_")
+        base = base[:60] if len(base) > 60 else base
+        name = f"stream_{base or 'live'}"
+        return s, name, True
+
+    if is_file_path(s):
+        p = Path(s).resolve()
+        return str(p), p.stem, False
+
+    # 兜底：当成流
+    return s, f"stream_{hashlib.md5(s.encode()).hexdigest()[:8]}", True
+
+def probe_video_meta_with_cv2(src_for_cv2) -> Tuple[int, int, float, int]:
+    """
+    用 OpenCV 读取一遍元信息（宽高/FPS/总帧数）。
+    - 对文件通常能拿到总帧数（>0）
+    - 对实时流/部分容器，总帧数可能为 -1
+    """
+    cap = cv2.VideoCapture(src_for_cv2)
+    if not cap.isOpened():
+        return 0, 0, 0.0, -1
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 0:
+        total = -1
+    cap.release()
+    return w, h, fps, total
 
 def color_from_id(track_id: int) -> Tuple[int, int, int]:
     """为同一 ID 生成稳定 BGR 颜色（避免过暗）"""
@@ -239,61 +315,71 @@ class RunStats:
 
 
 # =========================
-# ⑥ 单路视频：持久化 + 日志化
+# ⑥ 单路视频/流：持久化 + 进度条/日志
 # =========================
 
 def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: Path, glog: logging.Logger):
     """
-    单路视频跟踪（逐帧、自绘、持久化）：
-    - 定期输出进度（LOG_INTERVAL 帧）
-    - 完成后写 summary.json 与独立 run.log
+    单路视频/流 跟踪（逐帧、自绘、持久化）：
+    - 若为本地文件：显示 tqdm 进度条（百分比/ETA）
+    - 若为实时流：无进度条，仅周期性日志；输出视频延迟创建（拿到首帧尺寸后再建）
     """
-    vp = Path(video_path).resolve()
-    assert vp.exists(), f"视频不存在：{vp}"
+    # 解析源（得到：可被 OpenCV/YOLO 接受的 source、友好名字、是否流）
+    src_parsed, nice_name, is_stream = parse_source_and_name(video_path)
 
-    # 每路视频独立日志文件（贴近该视频名）
-    logger = logging.getLogger(f"video-{vp.stem}")
+    # 每路独立日志文件（贴近该名字）
+    logger = logging.getLogger(f"video-{nice_name}")
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
     fmt = logging.Formatter("[%(asctime)s][%(levelname)s][%(threadName)s] %(message)s", "%H:%M:%S")
-    fh = logging.FileHandler(out_root / f"{vp.stem}_run.log", encoding="utf-8")
+    fh = logging.FileHandler(out_root / f"{nice_name}_run.log", encoding="utf-8")
     fh.setLevel(logging.DEBUG); fh.setFormatter(fmt)
-    sh = logging.StreamHandler(); sh.setLevel(logging.INFO); sh.setFormatter(fmt)
-    # 仅写文件以避免多重控制台重复；若想也到控制台，可保留 sh
     logger.addHandler(fh)
 
-    logger.info(f"开始处理：{vp.name}  | device={device} | tracker={tracker_yaml}")
+    # 元信息（对文件通常能拿到总帧数；对流多为 -1）
+    src_w, src_h, src_fps, total_frames = probe_video_meta_with_cv2(src_parsed)
+    if not is_stream and not is_file_path(str(video_path)):
+        raise AssertionError(f"视频不存在：{video_path}")
 
-    # 读取基础信息（再由 YOLO 解码）
-    cap = cv2.VideoCapture(str(vp))
-    assert cap.isOpened(), f"无法打开视频：{vp}"
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0 else -1
-    cap.release()
-
-    out_dir = out_root / vp.stem
+    # 输出路径
+    out_dir = out_root / nice_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_mp4 = out_dir / f"{vp.stem}_tracked.mp4"
-    out_txt  = out_dir / f"{vp.stem}_tracks.txt"
-    summary_json = out_dir / f"{vp.stem}_summary.json"
+    out_mp4 = out_dir / f"{nice_name}_tracked.mp4"
+    out_txt  = out_dir / f"{nice_name}_tracks.txt"
+    summary_json = out_dir / f"{nice_name}_summary.json"
 
-    save_fps = SAVE_FPS or (src_fps if src_fps > 0 else 25)
-    vw = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), save_fps, (src_w, src_h), True)
+    # 输出 FPS：优先 SAVE_FPS，否则用源 FPS（拿不到则用 25）
+    save_fps = SAVE_FPS or (src_fps if src_fps and src_fps > 0 else 25.0)
+
+    # 惰性创建 VideoWriter（首帧到手后再创建，避免未知尺寸报错）
+    vw = None
+    def ensure_writer(w: int, h: int):
+        nonlocal vw
+        if vw is None:
+            vw = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"),
+                                 save_fps, (w, h), True)
 
     # 加载模型
     model = YOLO(MODEL_PATH)
     use_half = HALF and torch.cuda.is_available()
+    logger.info(
+        f"开始处理：{nice_name} | device={device} | tracker={tracker_yaml} | "
+        f"is_stream={is_stream} | src_fps={src_fps} | total={total_frames}"
+    )
     logger.info(f"模型加载完成（half={use_half}, imgsz={IMGSZ}, conf={CONF}, iou={IOU}, vid_stride={VID_STRIDE}）")
 
-    # 轨迹缓存与统计
     trails: Dict[int, deque] = {}
-    stats = RunStats(vp.stem)
+    stats = RunStats(nice_name)
+
+    # 文件：开启进度条；流：无进度条
+    pbar = None
+    if (not is_stream) and total_frames > 0 and tqdm is not None:
+        pbar = tqdm(total=total_frames, position=next(_PROGRESS_POS),
+                    desc=nice_name, leave=True, ncols=100)
 
     # 流式逐帧 + 持久化
     gen = model.track(
-        source=str(vp),
+        source=src_parsed,          # 文件/摄像头ID/URL 都可
         device=device,
         tracker=tracker_yaml,
         imgsz=IMGSZ,
@@ -302,17 +388,20 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
         half=use_half,
         vid_stride=VID_STRIDE,
         persist=True,
-        stream=True,
+        stream=True,               # 关键：逐帧拿结果
         save=False,
         verbose=False,
+        show=False,                # 若本地有 GUI 可改 True 弹窗（远程一般不开）
     )
 
-    # 主循环
     try:
         for results in gen:
-            frame = results.orig_img.copy()
-            boxes = getattr(results, "boxes", None)
+            # 注意：results.orig_img 已是 BGR uint8；不拷贝可省内存
+            frame = results.orig_img
+            h, w = frame.shape[:2]
+            ensure_writer(w, h)
 
+            boxes = getattr(results, "boxes", None)
             det_ids, xyxy = [], None
             if boxes is not None and boxes.id is not None and len(boxes) > 0:
                 det_ids = boxes.id.int().tolist()
@@ -324,36 +413,40 @@ def track_one_video(video_path: str, device: str, tracker_yaml: str, out_root: P
             vw.write(frame)
             stats.step(det_ids)
 
-            # 周期性日志
-            if stats.frames % LOG_INTERVAL == 0:
+            # 进度条（文件）或心跳日志（流）
+            if pbar is not None:
+                pbar.update(1)
+            elif stats.frames % LOG_INTERVAL == 0:
                 snap = stats.snapshot()
-                prefix = f"{vp.name} [{stats.frames}"
-                if total_frames > 0:
-                    prefix += f"/{total_frames}"
-                prefix += "]"
                 logger.info(
-                    f"{prefix} avgFPS={snap['avg_fps']:.2f} det={len(det_ids)} "
+                    f"{nice_name} [{stats.frames}] "
+                    f"avgFPS={snap['avg_fps']:.2f} det={len(det_ids)} "
                     f"uniqID={snap['unique_ids']} maxConc={snap['max_concurrent']}"
                 )
 
     except Exception as e:
-        logger.exception(f"处理 {vp.name} 时出错：{e}")
+        logger.exception(f"处理 {nice_name} 时出错：{e}")
         raise
     finally:
-        vw.release()
+        if pbar is not None:
+            pbar.close()
+        if vw is not None:
+            vw.release()
 
     # 结束与总结
     summary = stats.snapshot()
     summary.update(dict(
-        video=str(vp),
+        video=str(video_path),
+        is_stream=is_stream,
         output_video=str(out_mp4),
         mot_txt=str(out_txt if SAVE_TXT else ""),
+        src_fps=src_fps,
+        total_frames=total_frames
     ))
     summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # 关键摘要到全局日志
     glog.info(
-        f"[DONE] {vp.name} frames={summary['frames']} "
+        f"[DONE] {nice_name} frames={summary['frames']} "
         f"avgFPS={summary['avg_fps']:.2f} uniqID={summary['unique_ids']} "
         f"out={out_mp4}"
     )
@@ -403,14 +496,15 @@ def main():
             )
             t.start()
             batch.append((idx, vid, t))
-            logger.info(f"启动线程：cam{idx} -> {Path(vid).name} on GPU{dev}")
+            logger.info(f"启动线程：cam{idx} -> {Path(str(vid)).name} on GPU{dev}")
             idx += 1
 
         # 等这一批完成
         for (i, vid, t) in batch:
             t.join()
             # 每路的 summary.json 在对应子目录里，汇总时再读
-            stem = Path(vid).stem
+            # 注意：对流源 nice_name 与 stem 不同，这里用 parse_source_and_name 获取名字
+            _, stem, _ = parse_source_and_name(vid)
             summary_json = out_root / stem / f"{stem}_summary.json"
             if summary_json.exists():
                 try:
@@ -428,7 +522,7 @@ def main():
         writer.writeheader()
         for s in all_summaries:
             writer.writerow({
-                "name": s.get("name", ""),
+                "name": s.get("name", s.get("video", "")),
                 "video": s.get("video", ""),
                 "frames": s.get("frames", 0),
                 "duration_sec": f"{s.get('duration_sec', 0):.2f}",
