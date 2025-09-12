@@ -71,7 +71,7 @@ HEAT_BBOX_SCALE = 0.25         # HEATMODE=bbox 时：radius ≈ scale * sqrt(w*h
 HEATMAP_ALPHA = 0.35           # 叠加透明度
 HEATMAP_CMAP = cv2.COLORMAP_JET
 HEATMAP_GAMMA = 0.6            # <1 提升暗部；1 等比；>1 压暗暗部
-CLIP_MAX_SECONDS: Optional[float] = None  # 例：60.0 → 停留60s达满红；None 用 p99
+CLIP_MAX_SECONDS: Optional[float] = 60.0  # 例：60.0 → 停留60s达满红；None 用 p99
 STREAM_FPS_ASSUME = 25.0       # 流源拿不到 FPS 时的估计
 DT_MIN, DT_MAX = 0.001, 0.2    # 流源 dt 的夹持（秒）
 

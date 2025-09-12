@@ -1,3 +1,5 @@
+# python extract_frames.py -i "rec-16328-con-20250410142418-camera-0.avi" -o frames_n30 --every_n 30
+
 import cv2
 import math
 import argparse
@@ -117,4 +119,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# python extract_frames.py -i "rec-16328-con-20250410142418-camera-0.avi" -o frames_n30 --every_n 30
+
